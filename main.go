@@ -29,14 +29,19 @@ func main() {
 	}
 	fn := visualizeFn{fnName: "fib"}
 	ast.Walk(&fn, file)
+	// printer.Fprint(os.Stdout, token.NewFileSet(), fn.fnDecl)
 	b := &bytes.Buffer{}
 	printer.Fprint(b, token.NewFileSet(), fn.fnDecl)
-	visualizeRecFnCalls("fib", "4", b.String())
+	if err := visualizeRecFnCalls("fib", "4", b.String()); err != nil {
+		log.Fatal(err)
+	}
 	fn = visualizeFn{fnName: "fact"}
 	ast.Walk(&fn, file)
 	b = &bytes.Buffer{}
 	printer.Fprint(b, token.NewFileSet(), fn.fnDecl)
-	visualizeRecFnCalls("fact", "4", b.String())
+	if err := visualizeRecFnCalls("fact", "4", b.String()); err != nil {
+		log.Fatal(err)
+	}
 }
 
 const prg = `
@@ -44,17 +49,18 @@ package main
 
 import (
 	"fmt"
+	"strings"
 )
 
 func main() {
-	%s(%s)
+	%s(%s, 0)
 }
 
 %s
 `
 
-func visualizeRecFnCalls(fnName string, args string, fnBody string) {
-	generateRunRmGoFile("./pleaseWork.go", fmt.Sprintf(prg, fnName, args, fnBody))
+func visualizeRecFnCalls(fnName string, args string, fnBody string) error {
+	return generateRunRmGoFile("./pleaseWork.go", fmt.Sprintf(prg, fnName, args, fnBody))
 }
 
 func runGoProgram(file string) ([]byte, error) {
@@ -77,12 +83,13 @@ func generateRunRmGoFile(file string, contents string) error {
 	if err := writeGoProgram(file, contents); err != nil {
 		return err
 	}
+	defer os.Remove(file)
 	output, err := runGoProgram(file)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %v", output, err)
 	}
 	fmt.Print(string(output))
-	return os.Remove(file)
+	return nil
 }
 
 type fnNameVisitor struct{}
@@ -189,24 +196,73 @@ func (v *visualizeFn) Visit(node ast.Node) (w ast.Visitor) {
 	switch t := node.(type) {
 	case *ast.FuncDecl:
 		if t.Name.Name == v.fnName {
-			args := t.Type.Params.List
+			// Modify the recursive calls to add "depth+1" as the second
+			// parameter to the recursive function call.
+			addDepthParamToRecCalls(t.Name.Name, t.Body)
+			// Modify the body to add a print statement
 			printParams := []string{}
-			printArgs := []string{}
-			for _, arg := range args {
+			printArgs := []string{`strings.Repeat("-", depth)`}
+			for _, arg := range t.Type.Params.List {
 				printParams = append(printParams, "%v")
 				printArgs = append(printArgs, arg.Names[0].Name)
 			}
 			newBodyList := []ast.Stmt{}
+			// I think if we were "properly" constructing the AST to add a
+			// fmt.Printf statement we would need these types:
+			// *ast.ExprStmt: &{0x82032ca80}
+			// *ast.CallExpr: &{0x82032ee20 7545 [0x82032ee40 n] 0 7559}
+			// *ast.SelectorExpr: &{fmt Print}
+			// *ast.BasicLit: &{7546 STRING "hello %d"}
+			// *ast.Ident: n
 			printCall := &ast.BasicLit{token.NoPos, token.STRING, "fmt.Printf"}
-			printCallArg := &ast.BasicLit{token.NoPos, token.STRING, fmt.Sprintf("\"%s(%s)\\n\", %v", t.Name.Name, strings.Join(printParams, ", "), strings.Join(printArgs, ", "))}
+			printCallArg := &ast.BasicLit{token.NoPos, token.STRING, fmt.Sprintf("\"%%s%s(%s)\\n\", %v", t.Name.Name, strings.Join(printParams, ", "), strings.Join(printArgs, ", "))}
 			newPrintStmt := &ast.ExprStmt{&ast.CallExpr{printCall, token.NoPos, []ast.Expr{printCallArg}, token.NoPos, token.NoPos}}
 			newBodyList = append(newBodyList, newPrintStmt)
 			newBodyList = append(newBodyList, t.Body.List...)
 			t.Body.List = newBodyList
+			// Modify the function signature to accept a "depth" argument as the first parameter
+			depthFieldName := &ast.Ident{token.NoPos, "depth", nil}
+			depthFieldType := &ast.Ident{token.NoPos, "int", nil}
+			depthField := &ast.Field{nil, []*ast.Ident{depthFieldName}, depthFieldType, nil, nil}
+			t.Type.Params.List = append(t.Type.Params.List, depthField)
+			// Store the modified function
 			v.fnDecl = t
 		}
 	}
 	return v
+}
+
+func addDepthParamToRecCalls(fnName string, node ast.Node) {
+	// fmt.Printf("%T: %v\n", node, node)
+	switch t := node.(type) {
+	case *ast.BlockStmt:
+		for _, stmt := range t.List {
+			addDepthParamToRecCalls(fnName, stmt)
+		}
+	case *ast.ExprStmt:
+		addDepthParamToRecCalls(fnName, t.X)
+	case *ast.IfStmt:
+		addDepthParamToRecCalls(fnName, t.Body)
+	case *ast.ReturnStmt:
+		for _, result := range t.Results {
+			addDepthParamToRecCalls(fnName, result)
+		}
+	case *ast.BinaryExpr:
+		addDepthParamToRecCalls(fnName, t.X)
+		addDepthParamToRecCalls(fnName, t.Y)
+	case *ast.CallExpr:
+		addDepthParamToRecCalls(fnName, t.Fun)
+		for _, arg := range t.Args {
+			addDepthParamToRecCalls(fnName, arg)
+		}
+		name, ok := t.Fun.(*ast.Ident)
+		if !ok || name.Name != fnName {
+			return
+		}
+		depthIdent := &ast.Ident{token.NoPos, "depth", nil}
+		oneLit := &ast.BasicLit{token.NoPos, token.INT, "1"}
+		t.Args = append(t.Args, &ast.BinaryExpr{depthIdent, token.NoPos, token.ADD, oneLit})
+	}
 }
 
 func fib(n int) int {
