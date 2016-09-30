@@ -1,5 +1,4 @@
-// Playing around with the go syntax parsing packages.
-// http://www.lshift.net/blog/2011/04/30/using-the-syntax-tree-in-go/
+// Playing around with metaprogramming
 package main
 
 import (
@@ -10,8 +9,11 @@ import (
 	"go/token"
 	"log"
 	"os"
+	"os/exec"
+	"reflect"
 	"runtime"
 	"strings"
+	"text/template"
 )
 
 func main() {
@@ -28,6 +30,37 @@ func main() {
 	ast.Walk(&importVisitor{}, file)
 	ast.Walk(&fnBodyVisitor{}, file)
 	printer.Fprint(os.Stdout, fset, file)
+	visualizeCall(`thisIsNotExported()`)
+
+	generateRunRmGoFile("./pleaseWork.go", testmainTmpl)
+}
+
+func runGoProgram(file string) ([]byte, error) {
+	return exec.Command("go", "run", file).Output()
+}
+
+func writeGoProgram(file string, tmpl *template.Template) error {
+	f, err := os.Create(file)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := testmainTmpl.Execute(f, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
+func generateRunRmGoFile(file string, tmpl *template.Template) error {
+	if err := writeGoProgram(file, tmpl); err != nil {
+		return err
+	}
+	output, err := runGoProgram(file)
+	if err != nil {
+		return err
+	}
+	fmt.Print(string(output))
+	return os.Remove(file)
 }
 
 type fnNameVisitor struct{}
@@ -76,3 +109,53 @@ func (v *fnBodyVisitor) Visit(node ast.Node) (w ast.Visitor) {
 func thisIsNotExported() {
 	fmt.Println("hello")
 }
+
+// I think to get something like this to work we need to do something similar
+// to go test (/usr/local/Cellar/go/1.6/libexec/src/cmd/go/test.go) where we (I
+// think) write a program file and then execute that file. I have no idea how
+// that would get done though. The simple case I want right now is just
+// fibonacci. So I just need a file with a main package and a main function
+// which calls the fibonacci function (but altered so the first line prints out
+// the arguments).
+
+// 1. Run a different go program from the current one. CHECK
+// 2. Generate a go program and then call that go program. CHECK
+// 3. Be able to modify a function by adding a fmt.Print() statement at the top
+// of the function which prints out the function's name and its arguments.
+// 4. Write a function which takes a function name and prints out that modified
+// function name using 3.
+// 5. Put 1-4 together in one program and I think we'll have everything we need.
+func visualizeCall(s string) {
+	expr, err := parser.ParseExpr(s)
+	if err != nil {
+		log.Fatal(err)
+	}
+	switch t := expr.(type) {
+	case *ast.CallExpr:
+		fnIdent := t.Fun.(*ast.Ident)
+		fmt.Println(fnIdent.Name)
+		fnRef := reflect.ValueOf(fnIdent.Name)
+		fmt.Println(fnRef.Kind())
+		fmt.Println(reflect.Func)
+		// fmt.Printf("%T\n", t.Fun)
+		// t.Fun is of type *ast.Ident
+		// visualizeCall(`thisIsNotExported()`)
+		// t.Fun is of type *ast.SelectorExpr
+		//visualizeCall(`fmt.Println("hello there buddy")`)
+	default:
+		log.Fatal("could not parse string into a function call")
+	}
+}
+
+var testmainTmpl = template.Must(template.New("main").Parse(`
+package main
+
+import (
+	"fmt"
+)
+
+func main() {
+	fmt.Println("hello world! I am a generated file!!!")
+}
+
+`))
