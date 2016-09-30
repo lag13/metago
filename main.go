@@ -31,7 +31,12 @@ func main() {
 	ast.Walk(&fn, file)
 	b := &bytes.Buffer{}
 	printer.Fprint(b, token.NewFileSet(), fn.fnDecl)
-	generateRunRmGoFile("./pleaseWork.go", fmt.Sprintf(prg, b.String()))
+	visualizeRecFnCalls("fib", "4", b.String())
+	fn = visualizeFn{fnName: "fact"}
+	ast.Walk(&fn, file)
+	b = &bytes.Buffer{}
+	printer.Fprint(b, token.NewFileSet(), fn.fnDecl)
+	visualizeRecFnCalls("fact", "4", b.String())
 }
 
 const prg = `
@@ -42,11 +47,15 @@ import (
 )
 
 func main() {
-	fib(4)
+	%s(%s)
 }
 
 %s
 `
+
+func visualizeRecFnCalls(fnName string, args string, fnBody string) {
+	generateRunRmGoFile("./pleaseWork.go", fmt.Sprintf(prg, fnName, args, fnBody))
+}
 
 func runGoProgram(file string) ([]byte, error) {
 	return exec.Command("go", "run", file).Output()
@@ -205,4 +214,11 @@ func fib(n int) int {
 		return n
 	}
 	return fib(n-1) + fib(n-2)
+}
+
+func fact(n int) int {
+	if n == 0 {
+		return 1
+	}
+	return n * fact(n-1)
 }
