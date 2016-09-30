@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -13,10 +14,10 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
-	"text/template"
 )
 
 func main() {
+	// I'm not really sure what this FileSet variable does
 	fset := token.NewFileSet()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -26,33 +27,45 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	ast.Walk(&fnNameVisitor{}, file)
-	ast.Walk(&importVisitor{}, file)
-	ast.Walk(&fnBodyVisitor{}, file)
-	printer.Fprint(os.Stdout, fset, file)
-	visualizeCall(`thisIsNotExported()`)
-
-	generateRunRmGoFile("./pleaseWork.go", testmainTmpl)
+	fn := visualizeFn{fnName: "fib"}
+	ast.Walk(&fn, file)
+	b := &bytes.Buffer{}
+	printer.Fprint(b, token.NewFileSet(), fn.fnDecl)
+	generateRunRmGoFile("./pleaseWork.go", fmt.Sprintf(prg, b.String()))
 }
+
+const prg = `
+package main
+
+import (
+	"fmt"
+)
+
+func main() {
+	fib(4)
+}
+
+%s
+`
 
 func runGoProgram(file string) ([]byte, error) {
 	return exec.Command("go", "run", file).Output()
 }
 
-func writeGoProgram(file string, tmpl *template.Template) error {
+func writeGoProgram(file string, contents string) error {
 	f, err := os.Create(file)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if err := testmainTmpl.Execute(f, nil); err != nil {
+	if _, err := f.Write([]byte(contents)); err != nil {
 		return err
 	}
 	return nil
 }
 
-func generateRunRmGoFile(file string, tmpl *template.Template) error {
-	if err := writeGoProgram(file, tmpl); err != nil {
+func generateRunRmGoFile(file string, contents string) error {
+	if err := writeGoProgram(file, contents); err != nil {
 		return err
 	}
 	output, err := runGoProgram(file)
@@ -110,21 +123,6 @@ func thisIsNotExported() {
 	fmt.Println("hello")
 }
 
-// I think to get something like this to work we need to do something similar
-// to go test (/usr/local/Cellar/go/1.6/libexec/src/cmd/go/test.go) where we (I
-// think) write a program file and then execute that file. I have no idea how
-// that would get done though. The simple case I want right now is just
-// fibonacci. So I just need a file with a main package and a main function
-// which calls the fibonacci function (but altered so the first line prints out
-// the arguments).
-
-// 1. Run a different go program from the current one. CHECK
-// 2. Generate a go program and then call that go program. CHECK
-// 3. Be able to modify a function by adding a fmt.Print() statement at the top
-// of the function which prints out the function's name and its arguments.
-// 4. Write a function which takes a function name and prints out that modified
-// function name using 3.
-// 5. Put 1-4 together in one program and I think we'll have everything we need.
 func visualizeCall(s string) {
 	expr, err := parser.ParseExpr(s)
 	if err != nil {
@@ -147,15 +145,64 @@ func visualizeCall(s string) {
 	}
 }
 
-var testmainTmpl = template.Must(template.New("main").Parse(`
-package main
+type modifyFn string
 
-import (
-	"fmt"
-)
-
-func main() {
-	fmt.Println("hello world! I am a generated file!!!")
+func (v *modifyFn) Visit(node ast.Node) (w ast.Visitor) {
+	switch t := node.(type) {
+	case *ast.FuncDecl:
+		if t.Name.Name == string(*v) {
+			args := t.Type.Params.List
+			printParams := []string{}
+			printArgs := []string{}
+			for _, arg := range args {
+				printParams = append(printParams, "%v")
+				printArgs = append(printArgs, arg.Names[0].Name)
+			}
+			fmt.Println(args[0].Names[0])
+			newBodyList := make([]ast.Stmt, 1, len(t.Body.List)+1)
+			printCall := &ast.BasicLit{token.NoPos, token.STRING, "fmt.Printf"}
+			printCallArg := &ast.BasicLit{token.NoPos, token.STRING, fmt.Sprintf("\"%s(%s)\\n\", %v", t.Name.Name, strings.Join(printParams, ", "), strings.Join(printArgs, ", "))}
+			newPrintStmt := &ast.ExprStmt{&ast.CallExpr{printCall, token.NoPos, []ast.Expr{printCallArg}, token.NoPos, token.NoPos}}
+			newBodyList[0] = newPrintStmt
+			newBodyList = append(newBodyList, t.Body.List...)
+			t.Body.List = newBodyList
+		}
+	}
+	return v
 }
 
-`))
+type visualizeFn struct {
+	fnName string
+	fnDecl *ast.FuncDecl
+}
+
+func (v *visualizeFn) Visit(node ast.Node) (w ast.Visitor) {
+	switch t := node.(type) {
+	case *ast.FuncDecl:
+		if t.Name.Name == v.fnName {
+			args := t.Type.Params.List
+			printParams := []string{}
+			printArgs := []string{}
+			for _, arg := range args {
+				printParams = append(printParams, "%v")
+				printArgs = append(printArgs, arg.Names[0].Name)
+			}
+			newBodyList := []ast.Stmt{}
+			printCall := &ast.BasicLit{token.NoPos, token.STRING, "fmt.Printf"}
+			printCallArg := &ast.BasicLit{token.NoPos, token.STRING, fmt.Sprintf("\"%s(%s)\\n\", %v", t.Name.Name, strings.Join(printParams, ", "), strings.Join(printArgs, ", "))}
+			newPrintStmt := &ast.ExprStmt{&ast.CallExpr{printCall, token.NoPos, []ast.Expr{printCallArg}, token.NoPos, token.NoPos}}
+			newBodyList = append(newBodyList, newPrintStmt)
+			newBodyList = append(newBodyList, t.Body.List...)
+			t.Body.List = newBodyList
+			v.fnDecl = t
+		}
+	}
+	return v
+}
+
+func fib(n int) int {
+	if n < 2 {
+		return n
+	}
+	return fib(n-1) + fib(n-2)
+}
